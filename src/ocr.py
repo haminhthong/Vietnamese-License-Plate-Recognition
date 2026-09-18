@@ -180,6 +180,7 @@ def read_plate(
     # 1. Fast path: CLAHE
     preprocessed = preprocess_plate(crop_bgr, method="clahe")
     ocr_results = reader.readtext(preprocessed, detail=1, paragraph=False, allowlist=OCR_ALLOWLIST)
+    selected_ocr_results = ocr_results
     raw_text, ocr_conf, tokens = order_ocr_tokens(
         ocr_results, initial_layout, minimum_confidence=cfg.ocr_minimum_confidence
     )
@@ -203,12 +204,16 @@ def read_plate(
         # Nếu fallback cho kết quả tốt hơn, chọn fallback
         if fb_text and (not raw_text or fb_conf > ocr_conf):
             raw_text, ocr_conf, tokens = fb_text, fb_conf, fb_tokens
+            selected_ocr_results = fallback_results
+            rectified = was_rectified
 
     # Xác định layout cuối cùng dựa trên tokens
     final_layout = infer_plate_layout(crop_bgr, cfg.wide_ratio_threshold, tokens=tokens)
     if final_layout != initial_layout and tokens:
         raw_text, ocr_conf, tokens = order_ocr_tokens(
-            ocr_results, final_layout, minimum_confidence=cfg.ocr_minimum_confidence
+            selected_ocr_results,
+            final_layout,
+            minimum_confidence=cfg.ocr_minimum_confidence,
         )
 
     # 3. Kiểm tra cú pháp biển số Việt Nam và đề xuất sửa lỗi

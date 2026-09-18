@@ -87,7 +87,14 @@ def rectify_plate(crop_bgr: np.ndarray, minimum_area_ratio: float = 0.35) -> tup
         raise ValueError("minimum_area_ratio phải nằm trong khoảng (0, 1]")
     height, width = crop_bgr.shape[:2]
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 60, 180)
+    # Ảnh phẳng hoặc ảnh một màu không thể chứa đường viền tứ giác hữu ích.
+    # Trả về sớm cũng giúp fallback không phụ thuộc vào lỗi xử lý Canny của backend OpenCV.
+    if gray.size == 0 or float(gray.std()) == 0.0:
+        return crop_bgr, False
+    try:
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 60, 180)
+    except cv2.error:
+        return crop_bgr, False
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:10]:

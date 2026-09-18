@@ -1,4 +1,4 @@
-# 🚗 Vietnamese License Plate Recognition
+# Vietnamese License Plate Recognition
 
 [![CI](https://github.com/haminhthong/vietnamese-license-plate-recognition/actions/workflows/ci.yml/badge.svg)](https://github.com/haminhthong/vietnamese-license-plate-recognition/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -8,143 +8,212 @@
 [![Docker](https://img.shields.io/badge/Runtime-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Hệ thống nhận diện biển số xe (ALPR) tự động cho **ảnh tĩnh từ camera/cổng kiểm soát tại Việt Nam**, kết hợp giữa **YOLOv8** (phát hiện biển số), **EasyOCR** (nhận dạng ký tự), xử lý hình học token đa dòng và kiểm tra cú pháp định dạng biển số xe Việt Nam.
+Pipeline nhận diện biển số xe Việt Nam từ ảnh tĩnh, gồm YOLOv8 để phát hiện vùng biển số, EasyOCR để đọc ký tự và bộ kiểm tra cú pháp để đánh dấu kết quả cần xem xét. Mã nguồn, cấu hình, báo cáo đánh giá và CI dùng chung một luồng kỹ thuật được mô tả dưới đây.
 
----
+## Bài toán và phạm vi ứng dụng
 
-## 💡 Điểm cốt lõi của dự án
+### Bài toán
 
-1. **Phân định rõ vai trò mô hình:**
-   - **Detector:** Huấn luyện mô hình YOLOv8 trên tập dữ liệu ảnh xe để định vị chính xác vị trí biển số (`bounding box`).
-   - **Recognizer:** Tích hợp EasyOCR để nhận diện chuỗi ký tự trên vùng ảnh biển số đã crop và mở rộng lề đệm (`padding 5%`), giúp tránh mất nét viền hoặc ký tự sát mép.
-2. **Xử lý hình học token 1 dòng & 2 dòng:**
-   - Biển số Việt Nam gồm hai dạng chính: biển dài 1 dòng (ô tô) và biển vuông 2 dòng (xe máy, ô tô).
-   - EasyOCR thường trả về nhiều bounding boxes nhỏ lẻ. Hệ thống phân tích tọa độ tâm (`center_x`, `center_y`) và chiều cao token để gom dòng theo trục thẳng đứng rồi sắp xếp từ trái sang phải.
-3. **Tiền xử lý ảnh (Fast path & Fallback):**
-   - **Fast path:** Chuyển xám và cân bằng tương phản cục bộ CLAHE để xử lý bóng râm, chói sáng.
-   - **Fallback:** Nắn thẳng phối cảnh (Perspective Rectification) hoặc phân ngưỡng thích ứng khi ảnh chụp góc xiên hoặc tương phản yếu.
-4. **Kiểm tra cú pháp biển số Việt Nam (Syntax Validation & Suggestion):**
-   - Kiểm tra chuỗi ký tự thô theo các mẫu định dạng dân sự tiêu chuẩn (`DDLDDDD`, `DDLDDDDD`, `DDLLDDDDD`,...).
-   - Đưa ra đề xuất sửa lỗi ký tự nhầm lẫn quang học thường gặp (ví dụ: `O` $\leftrightarrow$ `0`, `B` $\leftrightarrow$ `8`, `I` $\leftrightarrow$ `1`), nhưng **tuyệt đối không tự ý ghi đè** kết quả OCR thô nhằm đảm bảo tính minh bạch cho người vận hành.
+Với một ảnh xe đầu vào, hệ thống cần:
 
----
+1. Phát hiện tất cả vùng biển số bằng YOLOv8.
+2. Cắt vùng biển số có thêm lề 5% và xử lý ảnh để OCR ổn định hơn.
+3. Đọc ký tự bằng EasyOCR, sắp xếp token theo bố cục 1 dòng hoặc 2 dòng.
+4. Chuẩn hóa chuỗi, kiểm tra mẫu định dạng biển số dân sự Việt Nam và trả về gợi ý sửa lỗi OCR nếu có.
+5. Giữ lại cả chuỗi đọc được và gợi ý sửa để người vận hành có thể kiểm tra, không tự động ghi đè kết quả thô.
 
-## 🏗️ Kiến trúc Pipeline
+### Phạm vi
 
-```text
-Ảnh phương tiện
-      │
-      ▼
-YOLOv8 Plate Detector
-      │
-      ▼
-Plate crop + 5% padding
-      │
-      ▼
-Gray / CLAHE preprocessing
-      │
-      ▼
-EasyOCR
-      │
-      ▼
-Token geometry ordering (1-line / 2-line)
-      │
-      ▼
-Chuỗi OCR thô
-      │
-      ▼
-Vietnamese syntax validation
-      │
-      ├── Hợp lệ  ──► [51F12345] (format_valid = True)
-      │
-      └── Nhầm lẫn (O/0, B/8...) ──► Gợi ý sửa [51F12845] (needs_review = True)
-      │
-      ▼
-Bounding box + Chuỗi biển số + Độ tin cậy
+- Đầu vào chính là ảnh JPEG, PNG hoặc WebP; API giới hạn tệp tải lên tối đa 10 MB.
+- Hỗ trợ ảnh có biển dài 1 dòng và biển 2 dòng dựa trên tỷ lệ khung hình cùng hình học token OCR.
+- Bộ mẫu hiện tại hỗ trợ chuỗi dân sự dài 7 đến 10 ký tự theo `resources/plate_templates.yaml`.
+- Không bao gồm theo dõi đối tượng trong video, nhận dạng biển ngoại giao, biển quân đội, đọc ảnh trực tiếp từ camera hoặc cơ chế tự động xác nhận pháp lý.
+- Dữ liệu ảnh thực tế, trọng số `.pt` và dataset cục bộ không được commit vào repository.
+
+## Luồng logic, luồng dữ liệu và quy trình kỹ thuật
+
+```mermaid
+flowchart TD
+    A[Ảnh xe hoặc dataset gốc] --> B{Luồng dữ liệu}
+    B -->|Suy luận| C[Đọc ảnh BGR]
+    B -->|Chuẩn bị dữ liệu| D[Kiểm tra YOLO labels + ảnh]
+    D --> E[Gộp MD5 / capture_group / plate_identity]
+    E --> F[GroupShuffleSplit 70/15/15]
+    F --> G[dataset/grouped: train val test + data.yaml]
+    G --> H[YOLOv8 train.py + configs/train.yaml]
+    H --> I[models/best.pt]
+    C --> J[YOLOv8 detector]
+    I --> J
+    J --> K{Mỗi bounding box}
+    K --> L[Crop + padding 5%]
+    L --> M{OCR fast path}
+    M --> N[Phóng đại + grayscale + bilateral + CLAHE]
+    N --> O[EasyOCR + lọc confidence tối thiểu]
+    O --> P{Rỗng hoặc confidence < ocr_threshold?}
+    P -->|Có| Q[Rectification tùy chọn + adaptive threshold]
+    Q --> O
+    P -->|Không| R[Sắp xếp token theo center_x hoặc dòng y]
+    O --> R
+    R --> S[Chuẩn hóa chuỗi + kiểm tra template]
+    S --> T[Gợi ý O/0, I/1, B/8... nếu phù hợp]
+    T --> U[Prediction: box, text, raw_text, confidence, layout, review]
+    U --> V[CLI JSON / FastAPI / Web UI]
+    G --> W[evaluate_detector.py]
+    W --> X[Precision, Recall, mAP50, mAP50-95]
+    Y[OCR CSV crop_path + plate_text] --> Z[evaluate_ocr.py]
+    Z --> AA[Exact accuracy, CER, character accuracy]
+    AB[E2E CSV image + box + plate_text] --> AC[evaluate_end_to_end.py]
+    U --> AC
+    AC --> AD[Recall, exact recall, latency, positional accuracy, confusion, error CSV]
+    AE[Push hoặc Pull Request] --> AF[GitHub Actions]
+    AF --> AG[pip check + Ruff + pytest + wheel build]
 ```
 
----
+### Chi tiết logic suy luận
 
-## 📊 Phương Pháp Đánh Giá (Evaluation)
+1. `LicensePlateRecognizer.predict()` kiểm tra ảnh không rỗng, kích thước tối thiểu `160x120` và ngưỡng detector trong `[0, 1]`.
+2. YOLOv8 chạy với `conf=detection_confidence`, `iou=nms_iou` và `imgsz=image_size`.
+3. Mỗi box được cắt trong biên ảnh, thêm `padding_ratio`; crop quá nhỏ bị bỏ qua.
+4. `read_plate()` chạy CLAHE trước. Khi chuỗi rỗng hoặc confidence thấp hơn `ocr_threshold`, hệ thống thử rectification và adaptive threshold nếu được bật.
+5. Token OCR được chuẩn hóa về chữ Latin in hoa và chữ số, lọc theo `ocr_minimum_confidence`, loại token thấp bất thường rồi sắp xếp theo bố cục.
+6. `validate_and_correct_plate()` chỉ tạo `suggested_text`; trường `text` vẫn là chuỗi đã chuẩn hóa từ OCR. `needs_review=true` khi sai format, confidence OCR thấp, confidence detector thấp hơn ngưỡng tự động chấp nhận hoặc có gợi ý sửa.
+7. CLI in danh sách JSON và có thể ghi ảnh minh họa. API chạy suy luận trong thread riêng, trả mã lỗi rõ ràng cho loại tệp, tệp rỗng, ảnh lỗi, model thiếu hoặc lỗi suy luận.
 
-Hệ thống đánh giá độc lập theo 3 tầng rõ ràng:
+### Cấu hình đang được dùng
 
-1. **Detector Evaluation (trên test split):**
-   - Đo lường khả năng phát hiện bounding box của YOLOv8: **mAP@50**, **Recall@50**.
-2. **OCR Evaluation (trên ảnh crop có nhãn):**
-   - **Exact Plate Accuracy:** Tỷ lệ biển số nhận dạng chính xác 100%.
-   - **Character Error Rate (CER):** Tỷ lệ sai lệch ở cấp độ từng ký tự theo khoảng cách Levenshtein.
-3. **End-to-End Evaluation (toàn bộ pipeline):**
-   - **End-to-End Exact Recall:** Tỷ lệ biển số trong ảnh thực tế vừa được phát hiện đúng vị trí (IoU $\ge 0.5$) vừa đọc chính xác toàn bộ chuỗi ký tự.
-   - **Error Analysis:** Phân loại nguyên nhân lỗi thành: bỏ sót phát hiện (`detector_miss`), bounding box lệch (`iou_poor`), hoặc nhận dạng sai chữ (`ocr_wrong`).
+`configs/recognition.yaml` được dùng chung bởi CLI, API và hai evaluator:
 
----
+| Nhóm | Khóa | Giá trị hiện tại |
+|---|---|---:|
+| Detector | `detection_confidence` | `0.25` |
+| Detector | `auto_accept_detector_threshold` | `0.50` |
+| Detector | `nms_iou` | `0.60` |
+| Detector/OCR | `image_size` | `640` |
+| Crop | `padding_ratio` | `0.05` |
+| OCR | `ocr_minimum_confidence` | `0.20` |
+| OCR fallback | `ocr_threshold` | `0.50` |
+| Layout | `wide_ratio_threshold` | `2.20` |
+| Xử lý | `enable_rectification` | `true` |
+| Xử lý | `enable_preprocessing_variants` | `true` |
+| Hậu xử lý | `enable_template_correction` | `true` |
 
-## 🗂️ Cấu Trúc Dự Án
+`configs/train.yaml` mặc định dùng `yolov8n.pt`, 60 epochs, batch 16, ảnh 640, patience 15, seed 42 và 2 workers. Có thể ghi đè `model`, `epochs`, `batch` qua CLI của `train.py`.
+
+## Cấu trúc thư mục dự án
 
 ```text
-├── configs/
-│   ├── recognition.yaml      # Tham số nhận diện, crop padding, ngưỡng tin cậy
-│   └── train.yaml            # Cấu hình huấn luyện YOLOv8
-├── resources/
-│   ├── plate_templates.yaml  # Mẫu định dạng biển số dân sự Việt Nam
-│   └── ocr_confusions.yaml   # Bảng cặp ký tự dễ nhầm lẫn (O/0, B/8, etc.)
-├── src/
-│   ├── config.py             # Dataclass quản lý cấu hình
-│   ├── dataset.py            # Kiểm soát leakage và chia tập train/val/test
-│   ├── grammar.py            # Kiểm tra cú pháp và gợi ý ký tự
-│   ├── io_utils.py           # Tiện ích đọc/ghi dữ liệu
-│   ├── metrics.py            # IoU, CER, Exact Accuracy, Error Analysis
-│   ├── ocr.py                # Tiền xử lý, EasyOCR và sắp xếp hình học token
-│   ├── pipeline.py           # Điều phối pipeline nhận diện hoàn chỉnh
-│   └── rectification.py      # Nắn phẳng góc nghiêng phối cảnh
+.
+├── .github/workflows/ci.yml       # CI: dependency, format, lint, test, build
 ├── app/
-│   ├── api.py                # FastAPI REST API endpoints
-│   ├── schemas.py            # Pydantic schemas kết quả nhận diện
-│   └── ui.html               # Giao diện Web Dashboard upload ảnh trực quan
+│   ├── api.py                     # FastAPI /, /health, /predict
+│   ├── schemas.py                 # Schema response Pydantic
+│   └── ui.html                    # Web UI upload ảnh và vẽ bbox
+├── configs/
+│   ├── data.example.yaml          # Mẫu data.yaml cho YOLO
+│   ├── recognition.yaml           # Cấu hình detector, crop, OCR, hậu xử lý
+│   └── train.yaml                 # Cấu hình huấn luyện
+├── data/
+│   ├── README.md                  # Hợp đồng dữ liệu và định dạng annotation
+│   ├── ocr_annotations.example.csv
+│   └── end_to_end_annotations.example.csv
+├── resources/
+│   ├── ocr_confusions.yaml        # Bảng nhầm lẫn ký tự OCR
+│   └── plate_templates.yaml       # Mẫu cú pháp biển số
 ├── scripts/
-│   ├── prepare_dataset.py    # Chia tập dữ liệu nhóm theo identity/burst
-│   ├── train.py              # Huấn luyện mô hình YOLOv8
-│   ├── predict.py            # Nhận diện biển số từ tệp ảnh qua CLI
-│   ├── evaluate_detector.py  # Đánh giá mAP detector
-│   ├── evaluate_ocr.py       # Đánh giá độ chính xác OCR
-│   └── evaluate_end_to_end.py# Đánh giá pipeline end-to-end
-├── tests/                    # Kiểm thử tự động (Unit & API tests)
-├── Dockerfile                # Containerization cho ứng dụng
-└── pyproject.toml            # Cấu hình package, dependencies và công cụ kiểm tra
+│   ├── prepare_dataset.py         # Audit và Group-Safe Split
+│   ├── train.py                   # Huấn luyện YOLOv8
+│   ├── predict.py                 # Suy luận ảnh qua CLI
+│   ├── evaluate_detector.py       # Đánh giá detector
+│   ├── evaluate_ocr.py            # Đánh giá OCR crop
+│   └── evaluate_end_to_end.py     # Đánh giá pipeline end-to-end
+├── src/
+│   ├── config.py                  # Dataclass và nạp YAML
+│   ├── dataset.py                 # Manifest, nhóm, chia split, data.yaml
+│   ├── grammar.py                 # Chuẩn hóa và kiểm tra format
+│   ├── io_utils.py                # Đọc ảnh, CSV, JSON, path
+│   ├── metrics.py                 # IoU, CER, accuracy, latency, error report
+│   ├── ocr.py                     # Preprocess, EasyOCR, ordering token
+│   ├── pipeline.py                # Điều phối suy luận end-to-end
+│   └── rectification.py           # Nắn phối cảnh tùy chọn
+├── tests/                         # Unit test và API test
+├── Dockerfile                     # Image chạy FastAPI
+├── pyproject.toml                 # Package, CLI entrypoint, Ruff, pytest
+├── requirements.txt               # Dependency runtime
+└── LICENSE                        # MIT License
 ```
 
----
+Các thư mục `dataset/`, `models/`, `runs/`, `artifacts/`, `outputs/`, cache Python và `.egg-info/` là dữ liệu sinh ra hoặc dữ liệu cục bộ; chúng đã được loại khỏi Git bằng `.gitignore`.
 
-## 🚀 Hướng Dẫn Cài Đặt & Sử Dụng (Quick Start)
+## Hướng dẫn cài đặt
 
-### 1. Cài đặt môi trường
-
-Yêu cầu **Python 3.11+**:
+Yêu cầu Python `3.11+`.
 
 ```bash
-# Tạo và kích hoạt môi trường ảo
 python -m venv .venv
-source .venv/bin/activate  # Trên Windows: .\.venv\Scripts\Activate.ps1
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
 
-# Cài đặt package và dependencies
-pip install --upgrade pip
-pip install -e ".[dev]"
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 ```
 
-### 2. Nhận diện biển số qua CLI
+Nếu chỉ chạy runtime, có thể dùng `python -m pip install -r requirements.txt`. CI dùng `pip install -e ".[dev]"` để cài đúng package, CLI entrypoint và công cụ kiểm tra.
+
+## Chuẩn bị dữ liệu và huấn luyện
+
+### 1. Dữ liệu detector
+
+Thư mục nguồn của `prepare_dataset.py` phải có `train/`, `valid/`, `test/`; mỗi split có `images/` và `labels/`. Mỗi dòng label có dạng YOLO:
+
+```text
+class_id x_center y_center width height
+```
+
+Tất cả tọa độ phải nằm trong `[0, 1]`, class duy nhất là `0: license_plate`. Metadata tùy chọn có thể chứa `image_path` hoặc `image_name`, `capture_group`, `plate_identity`, `plate_text`.
 
 ```bash
-python scripts/predict.py --weights models/best.pt --source sample/car.jpg --output outputs/result.jpg
+python scripts/prepare_dataset.py \
+  --source data/raw \
+  --metadata data/raw/metadata.csv \
+  --output dataset/grouped \
+  --audit-output artifacts/dataset_audit.json
 ```
 
-Kết quả trả về định dạng JSON:
+`--metadata` có thể bỏ qua. Script kiểm tra ảnh/label, gộp ảnh trùng MD5 và nhóm theo capture group hoặc identity trước khi chia `70% train / 15% val / 15% test`. Kết quả là `dataset/grouped/data.yaml`, ba split YOLO, `split_manifest.csv` và báo cáo audit JSON.
+
+### 2. Huấn luyện detector
+
+```bash
+python scripts/train.py \
+  --data dataset/grouped/data.yaml \
+  --config configs/train.yaml \
+  --runs runs
+```
+
+Trọng số tốt nhất do Ultralytics ghi trong thư mục `runs/`. Khi đã cài package editable, các entrypoint tương đương là `vlpr-prepare`, `vlpr-train`, `vlpr-predict`, `vlpr-evaluate-detector`, `vlpr-evaluate-ocr` và `vlpr-evaluate-e2e`.
+
+## Suy luận ảnh
+
+```bash
+python scripts/predict.py \
+  --weights models/best.pt \
+  --source sample/car.jpg \
+  --output outputs/prediction.jpg \
+  --config configs/recognition.yaml \
+  --cpu
+```
+
+`--cpu` là tùy chọn. JSON in ra có dạng:
+
 ```json
 [
   {
     "box": [120, 150, 310, 220],
     "detection_confidence": 0.95,
     "text": "51F12345",
+    "raw_text": "51F12345",
     "ocr_confidence": 0.88,
     "format_valid": true,
     "suggested_text": null,
@@ -154,63 +223,85 @@ Kết quả trả về định dạng JSON:
 ]
 ```
 
-### 3. Khởi chạy REST API & Web Dashboard
+`text` và `raw_text` hiện cùng phản ánh chuỗi OCR đã chuẩn hóa; `suggested_text` chỉ xuất hiện khi bộ template tìm thấy phương án sửa ký tự. Ảnh minh họa được ghi tại `--output`.
+
+## API và Web UI
 
 ```bash
-uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.api:app --host 0.0.0.0 --port 8000
 ```
 
-- **Giao diện Web UI:** Mở trình duyệt tại [http://localhost:8000/](http://localhost:8000/) để tải ảnh và xem khung bbox + biển số trực quan.
-- **Swagger API Docs:** Truy cập [http://localhost:8000/docs](http://localhost:8000/docs).
-- **Health Check:** `GET /health` trả về trạng thái hoạt động và khả dụng của mô hình.
+- `GET /`: phục vụ `app/ui.html`.
+- `GET /health`: trả `status`, `model_weights`, `model_available`; không yêu cầu model phải tồn tại.
+- `POST /predict`: nhận multipart field `image`, chỉ chấp nhận JPEG/PNG/WebP và tối đa 10 MB.
+- `GET /docs`: Swagger UI.
 
----
+API tìm model từ biến môi trường `MODEL_WEIGHTS`, mặc định `models/best.pt`; cấu hình nhận diện từ `RECOGNITION_CONFIG`, mặc định `configs/recognition.yaml`. `/predict` trả `filename`, `latency_ms` và `predictions` với các trường giống JSON CLI.
 
-## 🛠️ Huấn Luyện & Đánh Giá
+Các mã lỗi chính: `400` ảnh rỗng hoặc không giải mã được, `413` quá 10 MB, `415` sai MIME type, `422` ảnh không đạt điều kiện pipeline, `503` thiếu model/cấu hình không hợp lệ và `500` lỗi suy luận ngoài dự kiến.
 
-### 1. Chuẩn bị dữ liệu và ngăn ngừa rò rỉ (Data Leakage)
-Chia tập dữ liệu theo nhóm nguồn và danh tính biển số (`plate_identity` / `capture_group`):
+## Đánh giá và báo cáo
+
+Các file mẫu trong `data/` chỉ mô tả schema; ảnh thực tế phải được người dùng cung cấp. Đường dẫn trong CSV được giải quyết tương đối theo thư mục chứa CSV.
+
+### Detector
+
 ```bash
-python scripts/prepare_dataset.py --source data/raw --output dataset/grouped
+python scripts/evaluate_detector.py \
+  --weights models/best.pt \
+  --data dataset/grouped/data.yaml \
+  --output artifacts/detector_test_metrics.json
 ```
 
-### 2. Huấn luyện YOLOv8 Detector
+Đánh giá split `test` bằng Precision, Recall, `mAP50`, `mAP50-95` và ghi JSON.
+
+### OCR
+
+CSV cần `crop_path`, `plate_text`, tùy chọn `layout` (`1_line` hoặc `2_line`):
+
 ```bash
-python scripts/train.py --data dataset/grouped/data.yaml --config configs/train.yaml
+python scripts/evaluate_ocr.py \
+  --annotations data/ocr_annotations.example.csv \
+  --config configs/recognition.yaml \
+  --output artifacts/ocr_metrics.json \
+  --cpu
 ```
 
-### 3. Đánh giá kiểm thử
+Kết quả gồm Exact Plate Accuracy, CER, Character Accuracy và file dự đoán cùng tên `.predictions.csv`.
+
+### End-to-End
+
+CSV cần `image_path`, `x1`, `y1`, `x2`, `y2`, `plate_text`:
+
 ```bash
-# Đánh giá riêng Detector
-python scripts/evaluate_detector.py --weights models/best.pt --data dataset/grouped/data.yaml
-
-# Đánh giá riêng OCR trên ảnh crop
-python scripts/evaluate_ocr.py --annotations data/e2e/ocr_test.csv
-
-# Đánh giá toàn diện End-to-End
-python scripts/evaluate_end_to_end.py --weights models/best.pt --annotations data/e2e/test.csv
+python scripts/evaluate_end_to_end.py \
+  --weights models/best.pt \
+  --annotations data/end_to_end_annotations.example.csv \
+  --config configs/recognition.yaml \
+  --output artifacts/end_to_end_metrics.json \
+  --error-analysis-output artifacts/error_analysis.csv \
+  --iou-threshold 0.5 \
+  --cpu
 ```
 
----
+JSON end-to-end gồm detection recall, exact plate recall, OCR metrics, mean/P50/P95 latency, độ chính xác theo vị trí và confusion matrix. CSV lỗi dùng các nhãn `correct`, `detector_miss`, `iou_poor`, `ocr_wrong` và `template_over_correction`.
 
-## 🧪 Kiểm Thử Tự Động & CI
+## CI và kiểm tra chất lượng
 
-Dự án duy trì kiểm thử tự động toàn diện qua GitHub Actions:
+GitHub Actions trong `.github/workflows/ci.yml` chạy trên Python 3.11 cho push vào `main`, Pull Request và chạy thủ công:
 
 ```bash
-# Kiểm tra định dạng và quy chuẩn mã nguồn
+python -m pip install --upgrade pip build
+python -m pip install -e ".[dev]"
+python -m pip check
 python -m ruff format --check .
 python -m ruff check .
-
-# Chạy toàn bộ unit tests
-python -m pytest -v
-
-# Kiểm tra đóng gói build wheel
+python -m pytest
 python -m build --wheel
 ```
 
----
+CI không cần model hoặc dataset thật vì test chỉ kiểm tra logic, schema và helper. Muốn chạy suy luận/đánh giá thực tế phải cung cấp `models/best.pt` và dữ liệu theo hợp đồng ở `data/README.md`.
 
-## 📜 Giấy Phép (License)
+## Giấy phép
 
-Dự án được phát hành theo giấy phép [MIT License](LICENSE).
+Dự án phát hành theo [MIT License](LICENSE).
